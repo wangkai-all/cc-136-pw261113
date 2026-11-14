@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设备可靠性 · 首次故障生存分析</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="viz-root page">
+
+  <header class="page-head">
+    <div>
+      <h1>设备可靠性 · 首次故障生存分析</h1>
+      <p class="subtitle">Kaplan-Meier 生存曲线 · 延迟进入 · 右删失 · 可逐步复查的风险集计算</p>
+    </div>
+    <button id="theme-toggle" class="btn ghost" type="button" aria-label="切换深浅色">深色模式</button>
+  </header>
+
+  <!-- 数据源 -->
+  <section class="card" aria-label="数据源">
+    <div class="data-bar">
+      <label class="btn file-btn">
+        上传 CSV
+        <input type="file" id="file-input" accept=".csv,text/csv" hidden>
+      </label>
+      <button id="load-sample" class="btn" type="button">载入示例数据</button>
+      <button id="download-template" class="btn ghost" type="button">下载 CSV 模板</button>
+      <span id="data-source-info" class="muted">尚未加载数据。列要求见「口径与假设」页签。</span>
+    </div>
+  </section>
+
+  <!-- 筛选行：作用于下方所有图表与表格 -->
+  <section class="card" aria-label="筛选条件" id="filter-card" hidden>
+    <div class="filter-row">
+      <div class="filter-group">
+        <span class="filter-label" id="model-filter-label">型号</span>
+        <div id="model-chips" class="chips" role="group" aria-labelledby="model-filter-label"></div>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label" id="batch-filter-label">投用批次</span>
+        <div id="batch-chips" class="chips" role="group" aria-labelledby="batch-filter-label"></div>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label" for="cutoff-select">统一观测截止日</label>
+        <select id="cutoff-select"></select>
+        <input type="date" id="cutoff-custom" hidden>
+      </div>
+      <div class="filter-group checks">
+        <label><input type="checkbox" id="toggle-ci" checked> 95% 置信区间</label>
+        <label><input type="checkbox" id="toggle-censor"> 删失刻度</label>
+      </div>
+    </div>
+    <p class="filter-note muted" id="cutoff-note"></p>
+  </section>
+
+  <!-- KPI -->
+  <section class="kpis" id="kpis" hidden aria-label="汇总指标"></section>
+
+  <!-- 生存曲线 -->
+  <section class="card" id="chart-card" hidden>
+    <h2>首次故障生存曲线</h2>
+    <p class="card-sub">横轴为设备年龄（投用后天数）。点击曲线上的故障节点，查看该时点的在险设备、故障数与删失数。</p>
+    <div id="chart"></div>
+    <h3>各时点剩余在险样本</h3>
+    <div id="risk-table" class="table-wrap"></div>
+  </section>
+
+  <!-- 时点详情 -->
+  <section class="card" id="node-detail" hidden aria-live="polite"></section>
+
+  <!-- 明细页签（口径说明始终可见，数据相关页签在加载后填充） -->
+  <section class="card" id="tabs-card">
+    <div class="tab-bar" role="tablist">
+      <button class="tab" role="tab" id="tab-steps" aria-selected="true" data-tab="steps">计算明细</button>
+      <button class="tab" role="tab" id="tab-quarantine" aria-selected="false" data-tab="quarantine">隔离与修正 <span id="quarantine-badge" class="badge"></span></button>
+      <button class="tab" role="tab" id="tab-method" aria-selected="false" data-tab="method">口径与假设</button>
+    </div>
+
+    <div id="pane-steps" role="tabpanel">
+      <div class="pane-head">
+        <p class="muted">每个时点的进入 / 在险 / 故障 / 删失与 S(t)、Greenwood 标准误、95% 置信区间。与
+        <code>scripts/verify_km.py</code> 的输出同格式，可逐行对照。</p>
+        <button id="export-steps" class="btn" type="button">导出计算明细 CSV</button>
+      </div>
+      <div id="steps-tables"><p class="muted">加载数据后此处展示每个时点的风险集与曲线计算明细。</p></div>
+    </div>
+
+    <div id="pane-quarantine" role="tabpanel" hidden>
+      <div id="quarantine-tables"><p class="muted">加载数据后此处展示被隔离、被修正与未进入分析的记录。</p></div>
+    </div>
+
+    <div id="pane-method" role="tabpanel" hidden>
+      <div class="method">
+        <h3>数据列要求</h3>
+        <table class="doc-table">
+          <thead><tr><th>列名</th><th>含义</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td><code>device_id</code></td><td>设备编号</td><td>必填，唯一</td></tr>
+            <tr><td><code>model</code></td><td>型号</td><td>必填，曲线按型号分组</td></tr>
+            <tr><td><code>batch</code></td><td>投用批次</td><td>必填，用于筛选</td></tr>
+            <tr><td><code>commission_date</code></td><td>投用日期</td><td>必填，时间原点（YYYY-MM-DD）</td></tr>
+            <tr><td><code>observe_start</code></td><td>开始观测日期</td><td>可空；空或早于投用时按投用日进入（修正记录）</td></tr>
+            <tr><td><code>first_failure_date</code></td><td>首次故障日期</td><td>空 = 观测窗口内未故障，按右删失</td></tr>
+            <tr><td><code>retire_date</code></td><td>退役日期</td><td>可空</td></tr>
+            <tr><td><code>data_cutoff</code></td><td>数据观测截止</td><td>可空；空时仅按统一观测截止处理（修正记录）</td></tr>
+          </tbody>
+        </table>
+
+        <h3>计算口径</h3>
+        <ol>
+          <li><strong>指标与时间原点。</strong>展示首次故障的生存曲线 S(t)=P（首次故障年龄 &gt; t)。时间原点为投用日，t 为设备年龄（天）。</li>
+          <li><strong>延迟进入（左截断）。</strong>设备自「开始观测」起才进入在险集合，L = 开始观测 − 投用。投用到进入观测之间不计入在险——该设备在 L 之前的故障本就不可观测；若记录显示故障早于开始观测，按规则 Q5 隔离。</li>
+          <li><strong>右删失。</strong>观测窗口末 = min（退役日期， 数据观测截止， 统一观测截止）。窗口内未故障的设备在窗口末右删失。<strong>没有故障不代表永不故障</strong>，只是观测到此为止。故障日期晚于窗口末的记录同样按窗口末删失（修正记录）。</li>
+          <li><strong>同一时点的处理约定。</strong>统一按「先进入 → 再故障 → 后删失」：t 时刻进入的设备计入 t 的在险数；t 时刻删失的设备也计入 t 的在险数（视为故障之后离开）。每个时点的进入 / 在险 / 故障 / 删失四列在「计算明细」中逐行可查。</li>
+          <li><strong>置信区间。</strong>Greenwood 方差 + log-log 变换的 95% 区间。尾部在险数变小后区间会显著变宽——请以区间宽度而非点估计判断尾部。</li>
+          <li><strong>尾部不外推。</strong>曲线只画到各型号最后一个退出（故障或删失）时点，以竖线端标结束；样本耗尽后不再延伸。各时点剩余在险数见曲线下方风险表。</li>
+        </ol>
+
+        <h3>隔离规则（先隔离、不进入分析，全部记录可在「隔离与修正」复查）</h3>
+        <table class="doc-table">
+          <thead><tr><th>规则</th><th>内容</th></tr></thead>
+          <tbody>
+            <tr><td>Q1</td><td>必需日期缺失或无法解析</td></tr>
+            <tr><td>Q2</td><td>日期倒置：退役日期早于投用日期</td></tr>
+            <tr><td>Q3</td><td>日期倒置：首次故障早于投用日期</td></tr>
+            <tr><td>Q4</td><td>日期倒置：退役日期早于开始观测（设备从未进入可观测状态）</td></tr>
+            <tr><td>Q5</td><td>首次故障早于可观察范围（故障日期早于开始观测）</td></tr>
+            <tr><td>Q6</td><td>日期倒置：退役日期早于首次故障</td></tr>
+            <tr><td>Q7</td><td>日期倒置：数据观测截止早于投用日期</td></tr>
+          </tbody>
+        </table>
+        <p class="muted">不属于隔离的情形：开始观测缺失或早于投用（按投用日进入）、数据观测截止缺失（按统一截止）、
+        故障日期晚于观测窗口末（按窗口末删失）——这些进入「修正记录」。开始观测晚于整个观测窗口的设备不进入分析，列于「未进入分析」。</p>
+
+        <h3>退役删失的假设与潜在偏差</h3>
+        <p>本页把退役视为<strong>与故障风险独立的删失</strong>：假设被退役设备此后的故障风险与仍在观测的同类设备相同。
+        若实际并非如此——例如老化或亚健康设备被优先退役——高风险个体会提前离开样本，剩余在险集合风险偏低，
+        <strong>S(t) 会被高估（曲线偏乐观）</strong>；反之若退役政策优先保留老旧设备，则方向相反。
+        该假设无法由本数据自身检验，解读曲线时请保留这一不确定性；如退役与工况强相关，建议按工况分层后分别绘制。</p>
+
+        <h3>不要把型号间差异读作因果</h3>
+        <p>型号间曲线差异可能来自批次构成、投用时间、工况、维护策略等混杂因素，而非型号本身。
+        示例数据中 BX-200 自 2023Q3 起的批次被刻意设为更差——用批次筛选可以看到曲线随之改变。
+        本页不做假设检验；曲线差异只是描述性结果，不构成「型号导致可靠性差异」的因果结论。</p>
+
+        <h3>如何复查每一步计算</h3>
+        <ol>
+          <li>重新生成示例数据：<code>python3 scripts/generate_data.py</code>（固定随机种子，可复现）。</li>
+          <li>独立复算：<code>python3 scripts/verify_km.py data/sample_devices.csv --out out</code>，
+          得到每个型号的风险集与曲线明细（与页面「计算明细」同格式）。</li>
+          <li>页面「导出计算明细 CSV」（全部型号、全部批次、截止=数据自带截止时）与
+          <code>out/km_steps_all.csv</code> 可直接 diff。</li>
+          <li>自动对照：<code>node tests/compare_engines.mjs</code> 会逐时点比对 JS 与 Python 两套实现；
+          单元测试：<code>node --test tests/test_survival.mjs</code>、<code>python3 -m unittest tests.test_verify_km</code>。</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <footer class="page-foot muted">
+    本页面为纯前端计算，数据不离开浏览器。示例数据由 scripts/generate_data.py 本地生成，可复现、可复查。
+  </footer>
+</div>
+
+<script src="js/csv.js"></script>
+<script src="js/survival.js"></script>
+<script src="js/sample_data.js"></script>
+<script src="js/chart.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
